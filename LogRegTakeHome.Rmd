@@ -1,0 +1,123 @@
+---
+title: "LogRegTakeHome"
+author: "Bobby Thomas"
+date: "January 25, 2020"
+output: html_document
+---
+
+Q1 and Q2. First we have to bring in our data and check the initial structure of response proportions across target
+```{r}
+rm(list=ls())
+library(ggplot2)
+DataMain=read.delim(url("https://raw.githubusercontent.com/PerceptionCognitionLab/data2/master/out/morph1.dat"),header=T,sep=' ')
+
+Data1=DataMain[DataMain$sessionID%in%c(364,365,366,367,368,369),]
+RespCount=as.data.frame(table(Data1$resp,Data1$target,Data1$sessionID)) #Sum responses by sub and target into table
+RespCount=RespCount[RespCount$Var1==1,] #Just want count of 1 responses for proportion of 1 response
+
+ggplot(RespCount,aes(x=Var2,y=Freq/48,color=Var3,group=Var3))+
+  geom_line()+
+  ylab('Proportion of 1 responses')+
+  xlab('Target Level')+
+  guides(color=guide_legend(title='Subject'))
+```
+
+Q3. Now we need to remove subject 365 and also include background in our dataframe and plot
+```{r}
+ToUse=c(364,366,367,368,369)
+Data2=Data1[Data1$sessionID%in%ToUse,]
+ResponseCount=as.data.frame(table(Data2$resp,Data2$sessionID,Data2$target,Data2$background))
+ResponseCount=ResponseCount[ResponseCount$Var1==1,]; ResponseCount$Freq=ResponseCount$Freq/24
+MeanOverSession=tapply(ResponseCount$Freq,list(ResponseCount$Var3,ResponseCount$Var4),mean)
+
+plot(0:9,MeanOverSession[,1],typ='l',lwd=3,xlab='Target',ylab='Proportion of 1 Responses',main='Resp as a function of session,target, and background')
+lines(0:9,MeanOverSession[,2],typ='l',lwd=3)
+for(i in unique(ResponseCount$Var2)){
+  lines(0:9,ResponseCount$Freq[ResponseCount$Var2==i & ResponseCount$Var4==0],typ='l',col='red',lwd=.5,lty=2)
+  lines(0:9,ResponseCount$Freq[ResponseCount$Var2==i & ResponseCount$Var4==1],typ='l',col='green',lwd=.5,lty=2)
+}
+legend(1,1,legend=c('Background 0','Background 1','Mean'),col=c('red','green','black'),lty=c(2,2,1))
+
+  
+
+```
+
+Q4. Now we can look at whether there is a letter contrast effect for each individual. I am interpreting this as meaning that each individual has a separate intercept for each background, but the effect of target level is constant across subjects.
+Written out as a model where i-subject, j-target, k-background we have:
+\[
+Y_{ijk} \sim Binomial(P_{ijk})
+\]
+For the Null Model:
+\[
+P_{ijk}=P_{ij}= 1/(1+e^{(\alpha_i + \beta x_j)})
+\]
+For the Effects Model:
+\[
+P_{ijk}=1/(1+e^{(\alpha_{ik} + \beta x_j)})
+\]
+
+From this we can define a likelihood function for the Null model and the Effects model
+
+```{r}
+names(ResponseCount)=c('Var1','SessionId','Target','Background','Responses')
+ResponseCount$Responses=ResponseCount$Responses*24
+names(RespCount)=c('Var1','Target','SessionId','Responses')
+nSub=length(unique(ResponseCount$SessionId))
+ResponseCount$Target=as.numeric(ResponseCount$Target)
+
+#For likelihood null, params[[1]] is vector of alpha for each subject
+LikelihoodNull=function(params,ResponseCount,nSub,n=24){
+  alphas=rep(params[1:nSub],length(unique(ResponseCount$Target))*2)
+  P=1/(1+exp(-(alphas + params[length(params)]*ResponseCount$Target)))
+  Like=-sum(log(P)*ResponseCount$Responses+log(1-P)*(n-ResponseCount$Responses))
+  return(Like)
+}
+#For Likelihood BackgroundEffect params[[1]] is vector of alpha for each subject on backgroun 1 and params[[2]] is alpha for each subject on background 2
+LikelihoodBackgroundEffect=function(params,ResponseCount,nSub,n=24){
+  alphas=c(rep(params[1:nSub],length(unique(ResponseCount$Target))),rep(params[(nSub+1):(nSub*2)],length(unique(ResponseCount$Target))))
+  P=1/(1+exp(-(alphas + params[length(params)]*ResponseCount$Target))) 
+  Like=-sum(log(P)*ResponseCount$Responses+log(1-P)*(n-ResponseCount$Responses))
+  return(Like)
+}
+
+#Create parameter lists for each model to optimize for
+ParamsNull=c(rep(-5,nSub),.5)
+ParamsEffect=c(rep(-5,nSub*2),.5)
+
+OptimizedNull=optim(ParamsNull,LikelihoodNull,ResponseCount=ResponseCount,nSub=nSub)
+OptimizedEffect=optim(ParamsEffect,LikelihoodBackgroundEffect,ResponseCount=ResponseCount,nSub=nSub)
+```
+Q5: Now that we have the optimized alphas and betas for each model, as well as the minimized Log Likelihoods, we can use some technique of model selection to see whether the increased fit of the effect model justifies the increased parameters, in this case I will use BIC. Because we minimized rather than maximized the likelihood function, we instead add the term with the minimized log likelihood and then prefer the lower BIC.
+  To do this we need the minimized log likelihoods (from the optim calls in the last code chunk), the n number of observations which in this case is nrow(ResponseCount), or 100. And the number of parameters for each model.
+  The null model has I + 1 parameters, where I is the number of subjects so 5, and the +1 is the constant beta across all subjects, so k=6 for the null model
+  The effects model has I*K +1 parameters, I subjects, K levels of background, and +1 for Beta, so k=11 for the effects model
+```{r}
+nForBIC=nrow(ResponseCount)
+kNull=nSub+1
+kEffect=nSub*length(unique(ResponseCount$Background))+1
+
+BICNull=log(nForBIC)*kNull+2*OptimizedNull$value
+BICEffect=log(nForBIC)*kEffect+2*OptimizedEffect$value
+BICNull
+BICEffect
+```
+Q5 cont. We see that the BICNull is larget than the BICEffect by a substantial amount and therefore prefer the Effects model, which says that there is a letter contrast effect for each individual.
+
+Q6. We can take the parameter estimates from OptimizedEffect and compare the two different alpha values for each subject to get a value that represents each subjects contrast effect.
+Q7. We can then take these values and plot background 0 on the x axis, backgroun 1 on the y axis. If they were equal the points would be close to the diagnol, but as we see below they are all well below the diagonal indicating that Alpha for background 1 was consistently lower than Alpha for background 0 for all subjects. The vertical distance between the diagonal and the point gives Alpha0-Alpha1 for each subject.
+```{r}
+Alpha0=OptimizedEffect$par[1:nSub]
+Alpha1=OptimizedEffect$par[(nSub+1):(nSub*2)]
+AlphaDifference=Alpha0-Alpha1
+DeltPlot=data.frame(AlphaDifference,Sub=unique(ResponseCount$SessionId),Alpha0,Alpha1,col=c('red','green','blue','black','orange'))
+Limits=c(min(DeltPlot$Alpha1),max(DeltPlot$Alpha0))
+
+plot(DeltPlot$Alpha0,DeltPlot$Alpha1,col=DeltPlot$col,main='Alpha 0 and Alpha1 for each sub',xlab='Alpha background=0',ylab='Alpha background =1',pch=16,xlim=Limits,ylim=Limits)
+abline(a=0,b=1,lty=2)
+legend(-5.8,-4.2,legend=c('364','366','367','368','369'),col=DeltPlot$col,pch=16,title='Subject')
+
+```
+
+Q8. We could have modeled group averages instead of invidiauls. Which approach is better and why?
+In this case we should not try to model all the group data at once, because this is a non-linear model so averaging all data and then fitting our logistic model to it would distort the data in a non-linear way which is a big issue. One option is that you could first fit an alpha for each subject and background and then average these, as this is simply averaging the parameter that is a part of the logistic model, but this is very different than grouping all data together, and then fitting a single alpha. A more principled approach if you believe that all alphas are not truly indpendent might involve building a hierarchial model (should be extended to a bayesian model), which sets priors on alpha.
+
